@@ -2,9 +2,10 @@
 
 #define ColorPrint(__COLOR__, __FMT__, ...)		\
 SetConsoleTextColor(__COLOR__);					\
-printf(__FMT__, __VA_ARGS__);					\
+std::printf(__FMT__, __VA_ARGS__);					\
 SetConsoleTextColor(eWHITE);					\
 
+//再次确认是否删除
 bool CheckCommand(const char* fmt, ...)
 {
 	va_list args;
@@ -43,6 +44,7 @@ bool CheckCommand(const char* fmt, ...)
 
 int main(int argc, char** argv)
 {
+	//获得命令行的参数，也就是Redis命令
 	auto GetCmdParam = [&](int idx){
 		return idx < argc ? argv[idx] : NULL;
 	};

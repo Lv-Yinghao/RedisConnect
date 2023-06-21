@@ -66,21 +66,13 @@ public:
 	public:
 		static bool IsSocketTimeout()
 		{
-#ifdef XG_LINUX
 			return errno == 0 || errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR;
-#else
-			return WSAGetLastError() == WSAETIMEDOUT;
-#endif
 		}
 		static void SocketClose(SOCKET sock)
 		{
 			if (IsSocketClosed(sock)) return;
 
-#ifdef XG_LINUX
 			::close(sock);
-#else
-			::closesocket(sock);
-#endif
 		}
 		static bool IsSocketClosed(SOCKET sock)
 		{
@@ -88,29 +80,21 @@ public:
 		}
 		static bool SocketSetSendTimeout(SOCKET sock, int timeout)
 		{
-#ifdef XG_LINUX
 			struct timeval tv;
 
 			tv.tv_sec = timeout / 1000;
 			tv.tv_usec = timeout % 1000 * 1000;
 
 			return setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, (char*)(&tv), sizeof(tv)) == 0;
-#else
-			return setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, (char*)(&timeout), sizeof(timeout)) == 0;
-#endif
 		}
 		static bool SocketSetRecvTimeout(SOCKET sock, int timeout)
 		{
-#ifdef XG_LINUX
 			struct timeval tv;
 
 			tv.tv_sec = timeout / 1000;
 			tv.tv_usec = timeout % 1000 * 1000;
 
 			return setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, (char*)(&tv), sizeof(tv)) == 0;
-#else
-			return setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, (char*)(&timeout), sizeof(timeout)) == 0;
-#endif
 		}
 		SOCKET SocketConnectTimeout(const char* ip, int port, int timeout)
 		{
@@ -129,11 +113,9 @@ public:
 			if (::connect(sock, (struct sockaddr*)(&addr), sizeof(addr)) == 0)
 			{
 				ioctlsocket(sock, FIONBIO, &mode);
-
 				return sock;
 			}
-
-#ifdef XG_LINUX
+			
 			struct epoll_event ev;
 			struct epoll_event evs;
 			int handle = epoll_create(1);
@@ -159,39 +141,19 @@ public:
 					socklen_t len = sizeof(res);
 			
 					getsockopt(sock, SOL_SOCKET, SO_ERROR, (char*)(&res), &len);
+
 					ioctlsocket(sock, FIONBIO, &mode);
 			
 					if (res == 0)
 					{
 						::close(handle);
-			
+
 						return sock;
 					}
 				}
 			}
 			
 			::close(handle);
-#else
-			struct timeval tv;
-
-			fd_set ws;
-			FD_ZERO(&ws);
-			FD_SET(sock, &ws);
-
-			tv.tv_sec = timeout / 1000;
-			tv.tv_usec = timeout % 1000 * 1000;
-
-			if (select(sock + 1, NULL, &ws, NULL, &tv) > 0)
-			{
-				int res = ERROR;
-				int len = sizeof(res);
-			
-				getsockopt(sock, SOL_SOCKET, SO_ERROR, (char*)(&res), &len);
-				ioctlsocket(sock, FIONBIO, &mode);
-			
-				if (res == 0) return sock;
-			}
-#endif
 
 			SocketClose(sock);
 			
@@ -328,14 +290,17 @@ public:
 		friend RedisConnect;
 
 	protected:
-		int status;
-		string msg;
-		vector<string> res;
-		vector<string> vec;
+		int status; //状态信息
+		string msg; //出错信息
+		vector<string> res; //查询结果
+		vector<string> vec; //查询语句
 
 	protected:
 		int parse(const char* msg, int len)
 		{
+			printf("write msg:\n%s\n",msg);
+
+			// 批量字符串
 			if (*msg == '$')
 			{
 				const char* end = parseNode(msg, len);
@@ -344,8 +309,8 @@ public:
 
 				switch (end - msg)
 				{
-				case 0: return TIMEOUT;
-				case -1: return NOTFOUND;
+					case 0: return TIMEOUT;
+					case -1: return NOTFOUND;
 				}
 
 				return OK;
@@ -361,14 +326,19 @@ public:
 				this->status = OK;
 				this->msg = string(str, end);
 
+				// + 字符表示成功响应
 				if (*msg == '+') return OK;
+
+				// - 字符 后面跟着一个字符串 表示一条错误的响应信息
 				if (*msg == '-') return FAIL;
 
+				// ：字符表示返回一个整数类型的响应
 				this->status = atoi(str);
 
 				return OK;
 			}
 
+			// 数组 后面跟着很多数据元素
 			if (*msg == '*')
 			{
 				int cnt = atoi(str);
@@ -395,6 +365,8 @@ public:
 
 			return DATAERR;
 		}
+
+		// 解析一个响应元素的信息
 		const char* parseNode(const char* msg, int len)
 		{
 			const char* str = msg + 1;
@@ -469,9 +441,11 @@ public:
 		int getResult(RedisConnect* redis, int timeout)
 		{
 			auto doWork = [&]() {
+				// 构建要发送给Redis服务器的消息
 				string msg = toString();
 				Socket& sock = redis->sock;
 
+				// 构建要发送给Redis服务器的消息
 				if (sock.write(msg.c_str(), msg.length()) < 0) return NETERR;
 
 				int len = 0;
@@ -480,12 +454,17 @@ public:
 				char* dest = redis->buffer;
 				const int maxsz = redis->memsz;
 
+				// 从套接字读取响应，并解析响应消息
 				while (readed < maxsz)
 				{
-					if ((len = sock.read(dest + readed, maxsz - readed, false)) < 0) return len;
+					// 从套接字读取数据 不能超过缓冲区的大小
+					if ((len = sock.read(dest + readed, maxsz - readed, false)) < 0){
+						return len;	
+					} 
 
 					if (len == 0)
 					{
+						// 读取超时，延长超时时间并检查是否超过超时时间
 						delay += SOCKET_TIMEOUT;
 
 						if (delay > timeout) return TIMEOUT;
@@ -494,6 +473,7 @@ public:
 					{
 						dest[readed += len] = 0;
 
+						//解析消息并返回解析结果
 						if ((len = parse(dest, readed)) == TIMEOUT)
 						{
 							delay = 0;
@@ -512,6 +492,8 @@ public:
 			msg.clear();
 
 			redis->code = doWork();
+
+			// printf("code = %d\n",redis->code);
 
 			if (redis->code < 0 && msg.empty())
 			{
@@ -546,10 +528,10 @@ public:
 	};
 
 protected:
-	int code = 0;
+	int code = 0; //错误号
 	int port = 0;
 	int memsz = 0;
-	int status = 0;
+	int status = 0; //连接状态
 	int timeout = 0;
 	char* buffer = NULL;
 
@@ -626,7 +608,7 @@ public:
 	bool connect(const string& host, int port, int timeout = 3000, int memsz = 2 * 1024 * 1024)
 	{
 		close();
-
+		
 		if (sock.connect(host, port, timeout))
 		{
 			sock.setSendTimeout(SOCKET_TIMEOUT);
@@ -824,27 +806,13 @@ public:
 		return code;
 	}
 
-	string get(const string& key)
-	{
-		string res;
-
-		get(key, res);
-
-		return res;
-	}
-	string hget(const string& key, const string& filed)
-	{
-		string res;
-
-		hget(key, filed, res);
-
-		return res;
-	}
-
+	//返回一个锁的唯一标识符
 	const char* getLockId()
 	{
+		//使用线程局部变量保存锁的唯一标识符
 		thread_local char id[0xFF] = {0};
 
+		//获取主机的IP地址
 		auto GetHost = [](){
 			char hostname[0xFF];
 
@@ -855,29 +823,33 @@ public:
 			return (const char*)inet_ntoa(*(struct in_addr*)(data->h_addr_list[0]));
 		};
 
+		//生成锁的唯一标识符
 		if (*id == 0)
 		{
-#ifdef XG_LINUX
 			snprintf(id, sizeof(id) - 1, "%s:%ld:%ld", GetHost(), (long)getpid(), (long)syscall(SYS_gettid));
-#else
-			snprintf(id, sizeof(id) - 1, "%s:%ld:%ld", GetHost(), (long)GetCurrentProcessId(), (long)GetCurrentThreadId());
-#endif
 		}
 
 		return id;
 	}
+
+	// 为给定的键解锁
 	bool unlock(const string& key)
 	{
 		const char* lua = "if redis.call('get',KEYS[1])==ARGV[1] then return redis.call('del',KEYS[1]) else return 0 end";
 
+		//执行lua脚本，如果解锁成功并且状态为OK，则返回true
 		return eval(lua, key, getLockId()) > 0 && status == OK;
 	}
+
+	// 为给定的键加锁
 	bool lock(const string& key, int timeout = 30)
 	{
 		int delay = timeout * 1000;
 
+		//每10ms尝试获取锁，总等待时间为timout秒
 		for (int i = 0; i < delay; i += 10)
 		{
+			//使用set命令尝试将键设置为锁的唯一标识符，设置成功则返回true
 			if (execute("set", key, getLockId(), "nx", "ex", timeout) >= 0) return true;
 
 			Sleep(10);
@@ -887,11 +859,14 @@ public:
 	}
 
 protected:
+	// 从一个 RedisConnect 资源池中获取一个可用的 RedisConnect 对象
 	virtual shared_ptr<RedisConnect> grasp() const
 	{
+		//使用静态局部变量创建一个 RedisConnect 对象的资源池 Lambda表达式作为函数对象
 		static ResPool<RedisConnect> pool([&]() {
 			shared_ptr<RedisConnect> redis = make_shared<RedisConnect>();
 
+			// 连接 Redis 服务器并验证密码
 			if (redis && redis->connect(host, port, timeout, memsz))
 			{
 				if (redis->auth(passwd)) return redis;
@@ -900,8 +875,10 @@ protected:
 			return redis = NULL;
 		}, POOL_MAXLEN);
 
+		// 从资源池获取一个RedisConnect对象的共享指针
 		shared_ptr<RedisConnect> redis = pool.get();
 
+		// Redis对象存在并且没有发生错误
 		if (redis && redis->getErrorCode())
 		{
 			pool.disable(redis);
@@ -922,21 +899,22 @@ public:
 		static RedisConnect redis;
 		return &redis;
 	}
+
 	static void SetMaxConnCount(int maxlen)
 	{
 		if (maxlen > 0) POOL_MAXLEN = maxlen;
 	}
+
+	// 返回Redis实例对象
 	static shared_ptr<RedisConnect> Instance()
 	{
 		return GetTemplate()->grasp();
 	}
+
+	// 初始化Redis对象
 	static void Setup(const string& host, int port, const string& passwd = "", int timeout = 3000, int memsz = 2 * 1024 * 1024)
 	{
-#ifdef XG_LINUX
 		signal(SIGPIPE, SIG_IGN);
-#else
-		WSADATA data; WSAStartup(MAKEWORD(2, 2), &data);
-#endif
 		RedisConnect* redis = GetTemplate();
 
 		redis->host = host;
